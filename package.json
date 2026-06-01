@@ -1,0 +1,15 @@
+{
+  "name": "test-sniffer",
+  "version": "1.0.0",
+  "description": "手動テスト支援用エラー監視ラッパーツール",
+  "main": "index.js",
+  "scripts": {
+    "start:watch": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.0",
+    "node-notifier": "^10.0.0",
+    "picocolors": "^1.0.0",
+    "playwright": "^1.40.0"
+  }
+}
