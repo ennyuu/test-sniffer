@@ -41,6 +41,20 @@ const startUrl = cliUrl || process.env.START_URL || 'https://example.com';
 // Chromium ユーザーデータディレクトリ（未指定なら一時プロファイル）
 const userDataDir = process.env.USER_DATA_DIR || null;
 
+// 監視対象パスフィルタ（カンマ区切り、未指定時は全 URL を対象にする）
+const watchPaths = process.env.WATCH_PATHS
+  ? process.env.WATCH_PATHS.split(',').map((p) => p.trim()).filter(Boolean)
+  : [];
+
+// ------------------------------------------------------------
+// URL が監視対象パスに一致するか判定
+// watchPaths が空（WATCH_PATHS 未設定）の場合は全 URL を対象にする
+// ------------------------------------------------------------
+function isWatched(url) {
+  if (watchPaths.length === 0) return true;
+  return watchPaths.some((p) => url.includes(p));
+}
+
 // ------------------------------------------------------------
 // ログファイルのパス生成（logs/error_YYYYMMDD.log）
 // ------------------------------------------------------------
@@ -182,6 +196,13 @@ async function main() {
 
   console.log(pc.green(`[${ts}] [INFO] ターゲットURL: ${startUrl}`));
 
+  // WATCH_PATHS の状態を表示
+  if (watchPaths.length > 0) {
+    console.log(pc.green(`[${ts}] [INFO] 監視パス: ${watchPaths.join(', ')}`));
+  } else {
+    console.log(pc.green(`[${ts}] [INFO] 監視パス: すべて（WATCH_PATHS 未設定）`));
+  }
+
   // ブラウザ起動オプションの構築
   const launchOptions = {
     headless: false,
@@ -217,7 +238,10 @@ async function main() {
   page.on('console', (msg) => {
     if (msg.type() === 'error') {
       const pageUrl = page.url();
-      handleConsoleError(pageUrl, msg.text());
+      // WATCH_PATHS が設定されている場合、対象パスを含む URL のみ処理する
+      if (isWatched(pageUrl)) {
+        handleConsoleError(pageUrl, msg.text());
+      }
     }
   });
 
@@ -228,8 +252,11 @@ async function main() {
     const status = response.status();
     if (status >= 400) {
       const url = response.url();
-      const method = response.request().method();
-      handleApiError(url, method, status);
+      // WATCH_PATHS が設定されている場合、対象パスを含む URL のみ処理する
+      if (isWatched(url)) {
+        const method = response.request().method();
+        handleApiError(url, method, status);
+      }
     }
   });
 
