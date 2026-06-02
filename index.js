@@ -226,8 +226,8 @@ async function main() {
     }
   });
 
-  // 指定 URL を開く
-  await page.goto(startUrl);
+  // 指定 URL を開く（タイムアウトを 60 秒に設定）
+  await page.goto(startUrl, { timeout: 60000 });
 
   // ページ（ブラウザウィンドウ）が閉じられたらクリーンアップして終了
   // context.close イベントはユーザーによるウィンドウ閉じでは発火しないため、
