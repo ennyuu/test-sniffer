@@ -229,16 +229,17 @@ async function main() {
   // 指定 URL を開く
   await page.goto(startUrl);
 
-  // ブラウザが閉じられるまで待機
-  await new Promise((resolve) => {
-    context.once('close', resolve);
+  // ページ（ブラウザウィンドウ）が閉じられたらクリーンアップして終了
+  // context.close イベントはユーザーによるウィンドウ閉じでは発火しないため、
+  // page の close イベントを使用する
+  page.on('close', async () => {
+    console.log(pc.green(`[${getTimestamp()}] [INFO] ブラウザが閉じられました。TestSniffer を終了します。`));
+    try { await context.close(); } catch (_) {}
     if (browser) {
-      browser.once('disconnected', resolve);
+      try { await browser.close(); } catch (_) {}
     }
+    process.exit(0);
   });
-
-  console.log(pc.green(`[${getTimestamp()}] [INFO] ブラウザが閉じられました。TestSniffer を終了します。`));
-  process.exit(0);
 }
 
 main().catch((err) => {
