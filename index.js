@@ -187,6 +187,12 @@ async function main() {
     headless: false,
   };
 
+  // viewport: null を指定することで固定ビューポートを解除し、
+  // ウィンドウのリサイズに合わせて表示領域が伸縮するようにする
+  const contextOptions = {
+    viewport: null,
+  };
+
   let browser;
   let context;
 
@@ -194,12 +200,13 @@ async function main() {
     // ユーザーデータディレクトリが指定されている場合（セッション維持）
     context = await chromium.launchPersistentContext(userDataDir, {
       ...launchOptions,
+      ...contextOptions,
     });
     browser = null;
   } else {
     // 通常の一時プロファイルで起動
     browser = await chromium.launch(launchOptions);
-    context = await browser.newContext();
+    context = await browser.newContext(contextOptions);
   }
 
   const page = await context.newPage();
