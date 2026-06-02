@@ -226,8 +226,8 @@ async function main() {
     }
   });
 
-  // 指定 URL を開く
-  await page.goto(startUrl);
+  // 指定 URL を開く（タイムアウトを 60 秒に設定）
+  await page.goto(startUrl, { timeout: 60000 });
 
   // ブラウザが閉じられるまで待機
   await new Promise((resolve) => {
