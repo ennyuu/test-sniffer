@@ -46,6 +46,12 @@ const watchPaths = process.env.WATCH_PATHS
   ? process.env.WATCH_PATHS.split(',').map((p) => p.trim()).filter(Boolean)
   : [];
 
+// 録画状態フラグ（r キーで true、s キーで false）
+let isRecording = false;
+
+// 動画の一時保存ディレクトリ（recordVideo はコンテキスト作成時に指定が必要なため常時有効）
+const tempVideoDir = path.join(__dirname, 'logs', 'videos', '.tmp');
+
 // ------------------------------------------------------------
 // URL が監視対象パスに一致するか判定
 // watchPaths が空（WATCH_PATHS 未設定）の場合は全 URL を対象にする
@@ -72,6 +78,24 @@ function ensureLogsDir() {
   if (!fs.existsSync(logsDir)) {
     fs.mkdirSync(logsDir, { recursive: true });
   }
+}
+
+// logs/videos/ ディレクトリ（および一時ディレクトリ）を自動生成
+function ensureVideosDir() {
+  fs.mkdirSync(path.join(__dirname, 'logs', 'videos'), { recursive: true });
+  fs.mkdirSync(tempVideoDir, { recursive: true });
+}
+
+// 動画ファイルの保存パスを生成（logs/videos/rec_YYYYMMDD_HHmmss.webm）
+function getVideoSavePath() {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mo = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  const ss = String(now.getSeconds()).padStart(2, '0');
+  return path.join(__dirname, 'logs', 'videos', `rec_${yyyy}${mo}${dd}_${hh}${mm}${ss}.webm`);
 }
 
 // ------------------------------------------------------------
@@ -195,6 +219,7 @@ async function main() {
   }
 
   console.log(pc.green(`[${ts}] [INFO] ターゲットURL: ${startUrl}`));
+  console.log(pc.green(`[${ts}] [INFO] キーボードショートカット: [r] 録画開始  [s] 録画停止・保存`));
 
   // WATCH_PATHS の状態を表示
   if (watchPaths.length > 0) {
@@ -209,9 +234,13 @@ async function main() {
   };
 
   // viewport: null を指定することで固定ビューポートを解除し、
-  // ウィンドウのリサイズに合わせて表示領域が伸縮するようにする
+  // ウィンドウのリサイズに合わせて表示領域が伸縮するようにする。
+  // recordVideo はコンテキスト作成時にしか指定できないため、
+  // 常時録画しておき r/s キーで保存タイミングを制御する。
+  ensureVideosDir();
   const contextOptions = {
     viewport: null,
+    recordVideo: { dir: tempVideoDir },
   };
 
   let browser;
@@ -263,11 +292,51 @@ async function main() {
   // 指定 URL を開く（タイムアウトを 60 秒に設定）
   await page.goto(startUrl, { timeout: 60000 });
 
+  // ------------------------------------------------------------
+  // ターミナルキー入力による録画制御
+  // r キー: 録画開始（[REC] 表示）
+  // s キー: 録画停止・logs/videos/ へ保存
+  // ------------------------------------------------------------
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.setEncoding('utf8');
+
+    process.stdin.on('data', async (key) => {
+      if (key === 'r' || key === 'R') {
+        // 録画開始（すでに録画中の場合は無視）
+        if (!isRecording) {
+          isRecording = true;
+          console.log(pc.red(`[${getTimestamp()}] [REC] 録画を開始しました。停止するには [s] を押してください。`));
+        }
+      } else if (key === 's' || key === 'S') {
+        // 録画停止・保存（非録画状態での押下はエラーにしない）
+        if (isRecording) {
+          isRecording = false;
+          const savePath = getVideoSavePath();
+          try {
+            await page.video().saveAs(savePath);
+            console.log(pc.green(`[${getTimestamp()}] [INFO] 録画を保存しました: logs/videos/${path.basename(savePath)}`));
+          } catch (e) {
+            console.log(pc.yellow(`[${getTimestamp()}] [WARN] 録画の保存に失敗しました: ${e.message}`));
+          }
+        }
+      } else if (key === '\u0003') {
+        // Ctrl+C による手動終了
+        process.exit(0);
+      }
+    });
+  }
+
   // ページ（ブラウザウィンドウ）が閉じられたらクリーンアップして終了
   // context.close イベントはユーザーによるウィンドウ閉じでは発火しないため、
   // page の close イベントを使用する
   page.on('close', async () => {
     console.log(pc.green(`[${getTimestamp()}] [INFO] ブラウザが閉じられました。TestSniffer を終了します。`));
+    // stdin の raw モードを解除してから終了する
+    if (process.stdin.isTTY) {
+      try { process.stdin.setRawMode(false); } catch (_) {}
+    }
     try { await context.close(); } catch (_) {}
     if (browser) {
       try { await browser.close(); } catch (_) {}
