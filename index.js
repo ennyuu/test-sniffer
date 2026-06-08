@@ -46,6 +46,14 @@ const watchPaths = process.env.WATCH_PATHS
   ? process.env.WATCH_PATHS.split(',').map((p) => p.trim()).filter(Boolean)
   : [];
 
+// 録画状態フラグ
+let isRecording = false;
+// [r] キーで作成する録画専用ページ（このページの録画開始タイミング = [r] 押下時）
+let recordingPage = null;
+
+// 動画の一時保存ディレクトリ（recordVideo はコンテキスト作成時に指定が必要なため）
+const tempVideoDir = path.join(__dirname, 'logs', 'videos', '.tmp');
+
 // ------------------------------------------------------------
 // URL が監視対象パスに一致するか判定
 // watchPaths が空（WATCH_PATHS 未設定）の場合は全 URL を対象にする
@@ -72,6 +80,24 @@ function ensureLogsDir() {
   if (!fs.existsSync(logsDir)) {
     fs.mkdirSync(logsDir, { recursive: true });
   }
+}
+
+// logs/videos/ ディレクトリ（および一時ディレクトリ）を自動生成
+function ensureVideosDir() {
+  fs.mkdirSync(path.join(__dirname, 'logs', 'videos'), { recursive: true });
+  fs.mkdirSync(tempVideoDir, { recursive: true });
+}
+
+// 動画ファイルの保存パスを生成（logs/videos/rec_YYYYMMDD_HHmmss.webm）
+function getVideoSavePath() {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mo = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  const ss = String(now.getSeconds()).padStart(2, '0');
+  return path.join(__dirname, 'logs', 'videos', `rec_${yyyy}${mo}${dd}_${hh}${mm}${ss}.webm`);
 }
 
 // ------------------------------------------------------------
@@ -176,6 +202,25 @@ function handleConsoleError(pageUrl, message) {
 }
 
 // ------------------------------------------------------------
+// ページへのエラー監視リスナーを登録する（メインページ・録画ページ共通）
+// ------------------------------------------------------------
+function attachMonitors(p) {
+  p.on('console', (msg) => {
+    if (msg.type() === 'error') {
+      const pageUrl = p.url();
+      if (isWatched(pageUrl)) handleConsoleError(pageUrl, msg.text());
+    }
+  });
+  p.on('response', (response) => {
+    const status = response.status();
+    if (status >= 400) {
+      const url = response.url();
+      if (isWatched(url)) handleApiError(url, response.request().method(), status);
+    }
+  });
+}
+
+// ------------------------------------------------------------
 // メイン処理
 // ------------------------------------------------------------
 async function main() {
@@ -195,6 +240,7 @@ async function main() {
   }
 
   console.log(pc.green(`[${ts}] [INFO] ターゲットURL: ${startUrl}`));
+  console.log(pc.green(`[${ts}] [INFO] キーボードショートカット: [r] 録画開始（録画用タブが開きます）  [s] 録画停止・保存`));
 
   // WATCH_PATHS の状態を表示
   if (watchPaths.length > 0) {
@@ -209,9 +255,14 @@ async function main() {
   };
 
   // viewport: null を指定することで固定ビューポートを解除し、
-  // ウィンドウのリサイズに合わせて表示領域が伸縮するようにする
+  // ウィンドウのリサイズに合わせて表示領域が伸縮するようにする。
+  // recordVideo はコンテキスト作成時にしか設定できないため context に指定する。
+  // [r] キーで newPage() を呼ぶことで、録画開始タイミングを [r] 押下時にする。
+  // size を明示指定しないと viewport: null 環境でナビゲーションが失敗するため固定する。
+  ensureVideosDir();
   const contextOptions = {
     viewport: null,
+    recordVideo: { dir: tempVideoDir, size: { width: 1280, height: 720 } },
   };
 
   let browser;
@@ -232,46 +283,101 @@ async function main() {
 
   const page = await context.newPage();
 
-  // ------------------------------------------------------------
-  // コンソールエラーの監視
-  // ------------------------------------------------------------
-  page.on('console', (msg) => {
-    if (msg.type() === 'error') {
-      const pageUrl = page.url();
-      // WATCH_PATHS が設定されている場合、対象パスを含む URL のみ処理する
-      if (isWatched(pageUrl)) {
-        handleConsoleError(pageUrl, msg.text());
-      }
-    }
-  });
-
-  // ------------------------------------------------------------
-  // ネットワークエラー（4xx/5xx）の監視
-  // ------------------------------------------------------------
-  page.on('response', (response) => {
-    const status = response.status();
-    if (status >= 400) {
-      const url = response.url();
-      // WATCH_PATHS が設定されている場合、対象パスを含む URL のみ処理する
-      if (isWatched(url)) {
-        const method = response.request().method();
-        handleApiError(url, method, status);
-      }
-    }
-  });
+  // コンソールエラー・ネットワークエラーの監視をメインページに設定
+  attachMonitors(page);
 
   // 指定 URL を開く（タイムアウトを 60 秒に設定）
-  await page.goto(startUrl, { timeout: 60000 });
+  // ナビゲーション失敗時はツールを落とさず警告を出して監視を継続する
+  try {
+    await page.goto(startUrl, { timeout: 60000 });
+  } catch (e) {
+    console.log(pc.yellow(`[${getTimestamp()}] [WARN] 初期 URL へのナビゲーションに失敗しました: ${e.message.split('\n')[0]}`));
+  }
+
+  // ------------------------------------------------------------
+  // ターミナルキー入力による録画制御
+  // r キー: 録画開始（[REC] 表示）
+  // s キー: 録画停止・logs/videos/ へ保存
+  // isTTY の外側でリスナーを登録し、npm 経由でも確実にキー入力を受け取る
+  // setRawMode（Enterなしで1キー即時受信）は TTY 環境のみ有効にする
+  // ------------------------------------------------------------
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+  }
+  process.stdin.resume();
+  process.stdin.setEncoding('utf8');
+
+  process.stdin.on('data', async (key) => {
+    if (key === 'r' || key === 'R') {
+      // 録画開始: 新しいページを作成する（このページの録画開始 = [r] 押下時）
+      if (!isRecording) {
+        isRecording = true;
+        const currentUrl = page.url() || startUrl;
+        recordingPage = await context.newPage();
+        attachMonitors(recordingPage); // 録画ページにもエラー監視を適用
+        try {
+          await recordingPage.goto(currentUrl, { timeout: 60000 });
+        } catch (_) {}
+        await recordingPage.bringToFront();
+        console.log(pc.red(`[${getTimestamp()}] [REC] 録画を開始しました。録画用タブに切り替えました。停止するには [s] を押してください。`));
+      }
+    } else if (key === 's' || key === 'S') {
+      // 録画停止・即時保存: 録画ページを閉じて video.path() でファイルをコピーする
+      if (isRecording && recordingPage) {
+        isRecording = false;
+        const savePath = getVideoSavePath();
+        const rp = recordingPage;
+        recordingPage = null;
+        await rp.close(); // 録画ページを閉じてビデオを確定
+        try {
+          const tmpPath = await rp.video().path();
+          fs.copyFileSync(tmpPath, savePath);
+          console.log(pc.green(`[${getTimestamp()}] [INFO] 録画を保存しました: logs/videos/${path.basename(savePath)}`));
+        } catch (e) {
+          console.log(pc.yellow(`[${getTimestamp()}] [WARN] 録画の保存に失敗しました: ${e.message.split('\n')[0]}`));
+        }
+        try { await page.bringToFront(); } catch (_) {} // メインタブに戻す
+      }
+    } else if (key === '\u0003') {
+      // Ctrl+C による手動終了
+      process.exit(0);
+    }
+  });
 
   // ページ（ブラウザウィンドウ）が閉じられたらクリーンアップして終了
   // context.close イベントはユーザーによるウィンドウ閉じでは発火しないため、
   // page の close イベントを使用する
   page.on('close', async () => {
     console.log(pc.green(`[${getTimestamp()}] [INFO] ブラウザが閉じられました。TestSniffer を終了します。`));
+
+    // 録画中のままメインページが閉じられた場合に備えて録画ページ情報を退避
+    const rp = recordingPage;
+    const savePath = rp ? getVideoSavePath() : null;
+    recordingPage = null;
+    isRecording = false;
+
+    // stdin の raw モードを解除してから終了する
+    if (process.stdin.isTTY) {
+      try { process.stdin.setRawMode(false); } catch (_) {}
+    }
+
+    // context.close() で録画ページを含む全ページのビデオを確定させ、
+    // その後 rp.video().path() でパスを取得して fs.copyFileSync でコピーする
     try { await context.close(); } catch (_) {}
     if (browser) {
       try { await browser.close(); } catch (_) {}
     }
+
+    if (rp && savePath) {
+      try {
+        const tmpPath = await rp.video().path();
+        fs.copyFileSync(tmpPath, savePath);
+        console.log(pc.green(`[${getTimestamp()}] [INFO] 録画を保存しました: logs/videos/${path.basename(savePath)}`));
+      } catch (e) {
+        console.log(pc.yellow(`[${getTimestamp()}] [WARN] 録画の保存に失敗しました: ${e.message.split('\n')[0]}`));
+      }
+    }
+
     process.exit(0);
   });
 }
