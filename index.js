@@ -240,7 +240,9 @@ async function main() {
   ensureVideosDir();
   const contextOptions = {
     viewport: null,
-    recordVideo: { dir: tempVideoDir },
+    // viewport: null の場合 Playwright がビデオサイズを決定できないため、
+    // size を明示的に指定してナビゲーション失敗を防ぐ
+    recordVideo: { dir: tempVideoDir, size: { width: 1280, height: 720 } },
   };
 
   let browser;
@@ -290,7 +292,12 @@ async function main() {
   });
 
   // 指定 URL を開く（タイムアウトを 60 秒に設定）
-  await page.goto(startUrl, { timeout: 60000 });
+  // ナビゲーション失敗時はツールを落とさず警告を出して監視を継続する
+  try {
+    await page.goto(startUrl, { timeout: 60000 });
+  } catch (e) {
+    console.log(pc.yellow(`[${getTimestamp()}] [WARN] 初期 URL へのナビゲーションに失敗しました: ${e.message.split('\n')[0]}`));
+  }
 
   // ------------------------------------------------------------
   // ターミナルキー入力による録画制御
