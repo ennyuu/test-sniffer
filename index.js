@@ -48,6 +48,8 @@ const watchPaths = process.env.WATCH_PATHS
 
 // 録画状態フラグ（r キーで true、s キーで false）
 let isRecording = false;
+// [s] キー押下時の保存先パス（ページが閉じたときにここへコピーする）
+let recordingSavePath = null;
 
 // 動画の一時保存ディレクトリ（recordVideo はコンテキスト作成時に指定が必要なため常時有効）
 const tempVideoDir = path.join(__dirname, 'logs', 'videos', '.tmp');
@@ -312,24 +314,22 @@ async function main() {
   process.stdin.resume();
   process.stdin.setEncoding('utf8');
 
-  process.stdin.on('data', async (key) => {
+  process.stdin.on('data', (key) => {
     if (key === 'r' || key === 'R') {
       // 録画開始（すでに録画中の場合は無視）
       if (!isRecording) {
         isRecording = true;
+        recordingSavePath = null; // 保存予約をリセット
         console.log(pc.red(`[${getTimestamp()}] [REC] 録画を開始しました。停止するには [s] を押してください。`));
       }
     } else if (key === 's' || key === 'S') {
-      // 録画停止・保存（非録画状態での押下はエラーにしない）
+      // 録画停止（非録画状態での押下はエラーにしない）
+      // saveAs() はページが閉じるまでブロックするため、ここでは保存先パスを記録するだけ。
+      // 実際のファイル保存は page.on('close') 内で context.close() 後に行う。
       if (isRecording) {
         isRecording = false;
-        const savePath = getVideoSavePath();
-        try {
-          await page.video().saveAs(savePath);
-          console.log(pc.green(`[${getTimestamp()}] [INFO] 録画を保存しました: logs/videos/${path.basename(savePath)}`));
-        } catch (e) {
-          console.log(pc.yellow(`[${getTimestamp()}] [WARN] 録画の保存に失敗しました: ${e.message.split('\n')[0]}`));
-        }
+        recordingSavePath = getVideoSavePath();
+        console.log(pc.green(`[${getTimestamp()}] [INFO] 録画を停止しました。ブラウザを閉じると logs/videos/${path.basename(recordingSavePath)} に保存されます。`));
       }
     } else if (key === '\u0003') {
       // Ctrl+C による手動終了
@@ -343,27 +343,27 @@ async function main() {
   page.on('close', async () => {
     console.log(pc.green(`[${getTimestamp()}] [INFO] ブラウザが閉じられました。TestSniffer を終了します。`));
 
-    // 録画中かどうかをクローズ前に記録しておく
-    const shouldSave = isRecording;
+    // 保存先パスを確定する（[s]キー押下済み or 録画中のままブラウザを閉じた）
+    const savePath = recordingSavePath || (isRecording ? getVideoSavePath() : null);
     isRecording = false;
+    recordingSavePath = null;
 
     // stdin の raw モードを解除してから終了する
     if (process.stdin.isTTY) {
       try { process.stdin.setRawMode(false); } catch (_) {}
     }
 
-    // ブラウザが閉じると CDP 接続が切れるため saveAs() は使えない。
-    // context.close() を先に完了させてビデオファイルを確定させてから
-    // page.video().path() でパスを取得して fs.copyFileSync でコピーする。
+    // context.close() でビデオファイルを確定させ、その後 page.video().path() で
+    // 一時ファイルのパスを取得して fs.copyFileSync で保存先へコピーする。
+    // （ブラウザが閉じると CDP 接続が切れるため saveAs() は使えない）
     try { await context.close(); } catch (_) {}
     if (browser) {
       try { await browser.close(); } catch (_) {}
     }
 
-    if (shouldSave) {
+    if (savePath) {
       try {
         const tmpPath = await page.video().path();
-        const savePath = getVideoSavePath();
         fs.copyFileSync(tmpPath, savePath);
         console.log(pc.green(`[${getTimestamp()}] [INFO] 録画を保存しました: logs/videos/${path.basename(savePath)}`));
       } catch (e) {
