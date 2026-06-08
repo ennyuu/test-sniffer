@@ -303,51 +303,74 @@ async function main() {
   // ターミナルキー入力による録画制御
   // r キー: 録画開始（[REC] 表示）
   // s キー: 録画停止・logs/videos/ へ保存
+  // isTTY の外側でリスナーを登録し、npm 経由でも確実にキー入力を受け取る
+  // setRawMode（Enterなしで1キー即時受信）は TTY 環境のみ有効にする
   // ------------------------------------------------------------
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.setEncoding('utf8');
-
-    process.stdin.on('data', async (key) => {
-      if (key === 'r' || key === 'R') {
-        // 録画開始（すでに録画中の場合は無視）
-        if (!isRecording) {
-          isRecording = true;
-          console.log(pc.red(`[${getTimestamp()}] [REC] 録画を開始しました。停止するには [s] を押してください。`));
-        }
-      } else if (key === 's' || key === 'S') {
-        // 録画停止・保存（非録画状態での押下はエラーにしない）
-        if (isRecording) {
-          isRecording = false;
-          const savePath = getVideoSavePath();
-          try {
-            await page.video().saveAs(savePath);
-            console.log(pc.green(`[${getTimestamp()}] [INFO] 録画を保存しました: logs/videos/${path.basename(savePath)}`));
-          } catch (e) {
-            console.log(pc.yellow(`[${getTimestamp()}] [WARN] 録画の保存に失敗しました: ${e.message}`));
-          }
-        }
-      } else if (key === '\u0003') {
-        // Ctrl+C による手動終了
-        process.exit(0);
-      }
-    });
   }
+  process.stdin.resume();
+  process.stdin.setEncoding('utf8');
+
+  process.stdin.on('data', async (key) => {
+    if (key === 'r' || key === 'R') {
+      // 録画開始（すでに録画中の場合は無視）
+      if (!isRecording) {
+        isRecording = true;
+        console.log(pc.red(`[${getTimestamp()}] [REC] 録画を開始しました。停止するには [s] を押してください。`));
+      }
+    } else if (key === 's' || key === 'S') {
+      // 録画停止・保存（非録画状態での押下はエラーにしない）
+      if (isRecording) {
+        isRecording = false;
+        const savePath = getVideoSavePath();
+        try {
+          await page.video().saveAs(savePath);
+          console.log(pc.green(`[${getTimestamp()}] [INFO] 録画を保存しました: logs/videos/${path.basename(savePath)}`));
+        } catch (e) {
+          console.log(pc.yellow(`[${getTimestamp()}] [WARN] 録画の保存に失敗しました: ${e.message.split('\n')[0]}`));
+        }
+      }
+    } else if (key === '\u0003') {
+      // Ctrl+C による手動終了
+      process.exit(0);
+    }
+  });
 
   // ページ（ブラウザウィンドウ）が閉じられたらクリーンアップして終了
   // context.close イベントはユーザーによるウィンドウ閉じでは発火しないため、
   // page の close イベントを使用する
   page.on('close', async () => {
     console.log(pc.green(`[${getTimestamp()}] [INFO] ブラウザが閉じられました。TestSniffer を終了します。`));
+
+    // 録画中かどうかをクローズ前に記録しておく
+    const shouldSave = isRecording;
+    isRecording = false;
+
     // stdin の raw モードを解除してから終了する
     if (process.stdin.isTTY) {
       try { process.stdin.setRawMode(false); } catch (_) {}
     }
+
+    // ブラウザが閉じると CDP 接続が切れるため saveAs() は使えない。
+    // context.close() を先に完了させてビデオファイルを確定させてから
+    // page.video().path() でパスを取得して fs.copyFileSync でコピーする。
     try { await context.close(); } catch (_) {}
     if (browser) {
       try { await browser.close(); } catch (_) {}
     }
+
+    if (shouldSave) {
+      try {
+        const tmpPath = await page.video().path();
+        const savePath = getVideoSavePath();
+        fs.copyFileSync(tmpPath, savePath);
+        console.log(pc.green(`[${getTimestamp()}] [INFO] 録画を保存しました: logs/videos/${path.basename(savePath)}`));
+      } catch (e) {
+        console.log(pc.yellow(`[${getTimestamp()}] [WARN] 録画の保存に失敗しました: ${e.message.split('\n')[0]}`));
+      }
+    }
+
     process.exit(0);
   });
 }
